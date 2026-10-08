@@ -1,0 +1,7 @@
+{
+  "source": "Bundled synthgen source snapshot",
+  "package_version": "0.1.0",
+  "snapshot_date": "2026-10-05",
+  "sha256": "f70041c4b540ed1e376c1e841c4c4006dd6c18f66fc3f00134df5c896b9efbbf",
+  "scope": "Pinned Python package for contract compilation, optional approved-volume dataset generation, and verification."
+}

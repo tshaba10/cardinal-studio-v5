@@ -1,0 +1,5 @@
+*.py text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.command text eol=lf
+*.bat text eol=crlf

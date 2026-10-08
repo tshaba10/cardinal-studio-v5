@@ -1,0 +1,4 @@
+# Optional tools for contributors; normal app users only need requirements.txt.
+-r requirements.txt
+pytest>=8,<10
+ruff>=0.9,<1

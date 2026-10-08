@@ -1,0 +1,746 @@
+{
+  "contract": {
+    "name": "credit_card_portfolio",
+    "version": "3.0.0",
+    "domain": "credit_card",
+    "description": "Credit card portfolio: merchants, accounts, monthly statement cycles and card transactions. Balances, interest, minimum due and delinquency are derived from spending and payment behaviour; nothing that follows from other values is sampled."
+  },
+
+  "seed": 42,
+
+  "volume": {
+    "account": 100000,
+    "merchant": 150,
+    "steps": 36
+  },
+
+  "rule_library": {
+    "packages": ["common", "credit_card"],
+    "pins": {
+      "payment.minimum_due": "1.0",
+      "interest.daily_balance": "1.0"
+    }
+  },
+
+  "conventions": {
+    "money": "Exact fixed-point: decimal columns are int64 minor units internally; never binary floats.",
+    "rounding": { "mode": "half_up", "applied": "Once, when a value is created (interest when assessed, draws when converted to the column scale). Full precision before that." },
+    "day_count": "Actual days in the statement cycle, 365-day year (interest.daily_balance day_count_basis).",
+    "event_ordering": "Within a cycle: posting day, then sequence number. Payments post on the payment day.",
+    "payment_allocation": "A payment in cycle N pays the statement of cycle N-1.",
+    "initial_state": "Accounts are simulated from their open date (up to time.warmup_max_steps warm-up cycles before the output window, which are simulated and discarded). Accounts older than the warm-up start with a zero balance at the warm-up start.",
+    "terminal_state": "An account reaching 180 days past due is charged off; its balance is written off (charge_off_amount) and it produces no further cycles."
+  },
+
+  "parameters": {
+    "segments": ["prime", "near_prime", "subprime", "thin_file"],
+    "segment_shares": [0.40, 0.30, 0.20, 0.10],
+
+    "fico_score":   { "prime": {"mean": 765, "std": 30}, "near_prime": {"mean": 690, "std": 28}, "subprime": {"mean": 615, "std": 35}, "thin_file": {"mean": 660, "std": 45} },
+    "annual_income":{ "prime": {"mu": 11.46, "sigma": 0.45}, "near_prime": {"mu": 11.13, "sigma": 0.45}, "subprime": {"mu": 10.71, "sigma": 0.50}, "thin_file": {"mu": 10.55, "sigma": 0.55} },
+    "credit_limit": { "prime": {"mu": 9.39, "sigma": 0.45}, "near_prime": {"mu": 8.70, "sigma": 0.50}, "subprime": {"mu": 7.60, "sigma": 0.50}, "thin_file": {"mu": 7.31, "sigma": 0.45} },
+    "apr_purchase": { "prime": {"mean": 0.1799, "std": 0.020}, "near_prime": {"mean": 0.2399, "std": 0.020}, "subprime": {"mean": 0.2899, "std": 0.020}, "thin_file": {"mean": 0.2599, "std": 0.025} },
+    "internal_credit_score": { "prime": {"mean": 82, "std": 6}, "near_prime": {"mean": 64, "std": 7}, "subprime": {"mean": 42, "std": 8}, "thin_file": {"mean": 55, "std": 10} },
+
+    "missed_payment_intercept": { "prime": -5.5, "near_prime": -4.6, "subprime": -3.9, "thin_file": -4.2 },
+    "log_transactions_per_cycle": { "prime": 2.639, "near_prime": 2.485, "subprime": 2.197, "thin_file": 1.946 },
+
+    "payment_p_full":    { "prime": 0.75, "near_prime": 0.35, "subprime": 0.12, "thin_file": 0.30 },
+    "payment_p_minimum": { "prime": 0.05, "near_prime": 0.20, "subprime": 0.45, "thin_file": 0.25 },
+    "payment_partial_low": { "prime": 0.30, "near_prime": 0.10, "subprime": 0.05, "thin_file": 0.08 },
+
+    "mcc_groups": ["grocery", "gas", "restaurant", "travel", "retail", "utilities", "online", "other"],
+    "amount_by_mcc": {
+      "grocery":    {"mu": 3.80, "sigma": 0.70},
+      "gas":        {"mu": 3.60, "sigma": 0.40},
+      "restaurant": {"mu": 3.30, "sigma": 0.60},
+      "travel":     {"mu": 5.40, "sigma": 1.00},
+      "retail":     {"mu": 4.00, "sigma": 0.90},
+      "utilities":  {"mu": 4.60, "sigma": 0.40},
+      "online":     {"mu": 3.90, "sigma": 0.80},
+      "other":      {"mu": 3.70, "sigma": 0.80}
+    },
+    "states": {
+      "values":  ["CA", "TX", "FL", "NY", "IL", "PA", "OH", "GA", "NC", "MI", "OTHER"],
+      "weights": [0.12, 0.10, 0.09, 0.08, 0.06, 0.05, 0.05, 0.05, 0.04, 0.04, 0.32]
+    }
+  },
+
+  "time": {
+    "calendar": "monthly_cycle_day",
+    "output_start": "2023-07-01",
+    "output_steps": { "$ref": "#/volume/steps" },
+    "warmup_max_steps": 12,
+    "anchor": {
+      "start_date": "account.open_date",
+      "cycle_day": "account.cycle_day"
+    }
+  },
+
+  "shared": {
+    "unemployment_rate": {
+      "description": "Monthly unemployment rate (%), AR(1) around 4% with a mild downturn shock. Read by every account's missed-payment model.",
+      "process": "ar1",
+      "params": { "mean": 4.0, "phi": 0.92, "sigma": 0.12, "initial": 3.6, "min": 2.5, "max": 12.0 },
+      "shocks": [ { "from": "2024-11-01", "to": "2025-04-30", "add": 1.2 } ]
+    },
+    "spend_seasonality": {
+      "description": "Multiplicative spend factor by calendar month (holiday lift in Nov/Dec).",
+      "process": "seasonal",
+      "params": { "by_month": [0.90, 0.88, 0.97, 0.98, 1.00, 1.02, 1.03, 1.02, 0.98, 1.00, 1.10, 1.25] }
+    }
+  },
+
+  "entities": {
+
+    "merchant": {
+      "role": "static",
+      "description": "Merchant dimension. Volume from volume.merchant.",
+      "primary_key": ["merchant_id"],
+      "nodes": {
+        "merchant_id": {
+          "kind": "identifier", "type": "string", "unique": true,
+          "format": { "pattern": "MER-[A-Z0-9]{8}", "example": "MER-7KQX2W4P" }
+        },
+        "merchant_name": {
+          "kind": "decorative", "type": "string", "rule": "text.compose",
+          "params": {
+            "parts": [
+              ["Blue", "Golden", "Main Street", "Corner", "Urban", "Green", "Sunset", "Harbor", "Metro", "Prairie", "Summit", "Maple"],
+              ["Oak", "River", "Pine", "Lake", "Stone", "Cedar", "Bay", "Ridge", "Valley", "Field"],
+              ["Market", "Cafe", "Fuel", "Outfitters", "Grill", "Supply", "Travel", "Goods", "Pharmacy", "Electric", "Store", "Bistro"]
+            ]
+          }
+        },
+        "mcc_group": {
+          "kind": "drawn", "type": "string", "dist": "categorical",
+          "params": {
+            "values":  { "$ref": "#/parameters/mcc_groups" },
+            "weights": [0.20, 0.10, 0.17, 0.07, 0.20, 0.06, 0.12, 0.08]
+          }
+        },
+        "mcc_code": {
+          "kind": "drawn", "type": "string", "dist": "categorical",
+          "conditioned_on": "merchant.mcc_group",
+          "format": { "pattern": "[0-9]{4}" },
+          "params": {
+            "grocery":    { "values": ["5411", "5422", "5499"], "weights": [0.75, 0.10, 0.15] },
+            "gas":        { "values": ["5541", "5542"],         "weights": [0.55, 0.45] },
+            "restaurant": { "values": ["5812", "5813", "5814"], "weights": [0.45, 0.15, 0.40] },
+            "travel":     { "values": ["3000", "4511", "7011", "4121"], "weights": [0.20, 0.35, 0.35, 0.10] },
+            "retail":     { "values": ["5311", "5651", "5732", "5942"], "weights": [0.35, 0.30, 0.20, 0.15] },
+            "utilities":  { "values": ["4900", "4814"],         "weights": [0.60, 0.40] },
+            "online":     { "values": ["5964", "5968", "5818"], "weights": [0.50, 0.25, 0.25] },
+            "other":      { "values": ["7230", "8099", "7997"], "weights": [0.40, 0.35, 0.25] }
+          }
+        },
+        "state": {
+          "kind": "drawn", "type": "string", "dist": "categorical",
+          "params": { "$ref": "#/parameters/states" }
+        },
+        "is_online": {
+          "kind": "drawn", "type": "boolean", "dist": "bernoulli",
+          "conditioned_on": "merchant.mcc_group",
+          "params": {
+            "grocery": {"p": 0.05}, "gas": {"p": 0.0}, "restaurant": {"p": 0.10}, "travel": {"p": 0.55},
+            "retail": {"p": 0.30}, "utilities": {"p": 0.70}, "online": {"p": 1.0}, "other": {"p": 0.20}
+          }
+        },
+        "popularity": {
+          "kind": "drawn", "type": "float", "emit": false, "dist": "lognormal",
+          "description": "Relative transaction share; used as selection weight by transaction.merchant_id.",
+          "params": { "mu": 0.0, "sigma": 1.0 }
+        }
+      }
+    },
+
+    "account": {
+      "role": "static",
+      "description": "One row per account. Static attributes fixed for the account's lifetime (Phase 1). Volume from volume.account.",
+      "primary_key": ["account_id"],
+      "joint_groups": {
+        "origination": {
+          "method": "gaussian_copula",
+          "description": "Underwriting attributes are correlated at origination (within segment).",
+          "members": ["fico_score", "internal_credit_score", "annual_income", "credit_limit", "apr_purchase"],
+          "correlation": [
+            [ 1.00,  0.80,  0.35,  0.55, -0.60],
+            [ 0.80,  1.00,  0.30,  0.50, -0.50],
+            [ 0.35,  0.30,  1.00,  0.60, -0.20],
+            [ 0.55,  0.50,  0.60,  1.00, -0.35],
+            [-0.60, -0.50, -0.20, -0.35,  1.00]
+          ]
+        }
+      },
+      "nodes": {
+        "account_id": {
+          "kind": "identifier", "type": "string", "unique": true,
+          "format": { "pattern": "ACC-[A-Z0-9]{10}", "example": "ACC-3F7KQ2XM91" }
+        },
+        "segment": {
+          "kind": "drawn", "type": "string", "dist": "categorical",
+          "allocation": "exact",
+          "description": "Phase 0 quota: segment shares are met exactly, then accounts are simulated.",
+          "params": {
+            "values":  { "$ref": "#/parameters/segments" },
+            "weights": { "$ref": "#/parameters/segment_shares" }
+          }
+        },
+        "product_type": {
+          "kind": "drawn", "type": "string", "dist": "categorical",
+          "conditioned_on": "account.segment",
+          "params": {
+            "prime":      { "values": ["cashback", "travel_rewards", "balance_transfer"], "weights": [0.45, 0.40, 0.15] },
+            "near_prime": { "values": ["cashback", "travel_rewards", "balance_transfer", "student"], "weights": [0.50, 0.20, 0.20, 0.10] },
+            "subprime":   { "values": ["cashback", "secured"], "weights": [0.40, 0.60] },
+            "thin_file":  { "values": ["student", "secured", "cashback"], "weights": [0.50, 0.30, 0.20] }
+          }
+        },
+        "open_date": {
+          "kind": "drawn", "type": "date", "dist": "date_uniform",
+          "params": { "start": "2017-01-01", "end": "2026-03-31" }
+        },
+        "cycle_day": {
+          "kind": "drawn", "type": "int16", "dist": "uniform_int",
+          "description": "Statement day of month, fixed at open. 1-28 avoids month-end gaps.",
+          "params": { "low": 1, "high": 28 },
+          "bounds": { "min": 1, "max": 28, "on_violation": "error" }
+        },
+        "fico_score": {
+          "kind": "joint", "group": "origination", "type": "int16", "dist": "normal",
+          "conditioned_on": "account.segment",
+          "params": { "$ref": "#/parameters/fico_score" },
+          "bounds": { "min": 300, "max": 850, "on_violation": "truncate" }
+        },
+        "internal_credit_score": {
+          "kind": "joint", "group": "origination", "type": "decimal(5,2)", "dist": "normal",
+          "description": "Internal behaviour score 0-100, reported in steps of 0.05.",
+          "conditioned_on": "account.segment",
+          "params": { "$ref": "#/parameters/internal_credit_score" },
+          "bounds": { "min": 0, "max": 100, "on_violation": "truncate" },
+          "quantization": { "round_to": 0.05, "mode": "half_up" }
+        },
+        "annual_income": {
+          "kind": "joint", "group": "origination", "type": "decimal(12,2)", "dist": "lognormal",
+          "conditioned_on": "account.segment",
+          "params": { "$ref": "#/parameters/annual_income" },
+          "bounds": { "min": 10000, "max": 2000000, "on_violation": "truncate" },
+          "quantization": { "round_to": 1000 }
+        },
+        "credit_limit": {
+          "kind": "joint", "group": "origination", "type": "decimal(10,2)", "dist": "lognormal",
+          "conditioned_on": "account.segment",
+          "params": { "$ref": "#/parameters/credit_limit" },
+          "bounds": { "min": 500, "max": 50000, "on_violation": "truncate" },
+          "quantization": { "round_to": 500 }
+        },
+        "apr_purchase": {
+          "kind": "joint", "group": "origination", "type": "decimal(6,4)", "dist": "normal",
+          "conditioned_on": "account.segment",
+          "params": { "$ref": "#/parameters/apr_purchase" },
+          "bounds": { "min": 0.0999, "max": 0.3599, "on_violation": "truncate" },
+          "quantization": { "round_to": 0.0025 }
+        },
+        "masked_pan": {
+          "kind": "decorative", "type": "string", "rule": "id.masked_pan",
+          "format": { "pattern": "[456][0-9]{3} **** **** [0-9]{4}", "check_digit": "luhn" },
+          "params": { "prefixes": ["4", "51", "52", "53", "54", "55", "6011"], "prefix_weights": [0.55, 0.07, 0.07, 0.07, 0.07, 0.07, 0.10] }
+        },
+        "home_state": {
+          "kind": "drawn", "type": "string", "dist": "categorical",
+          "params": { "$ref": "#/parameters/states" }
+        },
+        "is_paperless": {
+          "kind": "drawn", "type": "boolean", "dist": "bernoulli",
+          "conditioned_on": "account.segment",
+          "params": { "prime": {"p": 0.75}, "near_prime": {"p": 0.65}, "subprime": {"p": 0.50}, "thin_file": {"p": 0.80} }
+        },
+        "email_domain": {
+          "kind": "decorative", "type": "string", "dist": "categorical",
+          "nullable": true, "null_rate": 0.04,
+          "params": { "values": ["gmail.com", "yahoo.com", "outlook.com", "icloud.com", "other"], "weights": [0.45, 0.15, 0.15, 0.12, 0.13] }
+        }
+      }
+    },
+
+    "account_cycle": {
+      "role": "stepped",
+      "parent": "account",
+      "description": "One row per account per statement cycle in the output window (Phase 2 time loop).",
+      "primary_key": ["account_id", "cycle_number"],
+      "terminal_when": "account_cycle.charged_off",
+      "nodes": {
+        "account_id": {
+          "kind": "parent_key", "type": "string", "references": "account.account_id"
+        },
+        "cycle_number": {
+          "kind": "context", "type": "int16", "source": "step.cycle_number",
+          "description": "1 = statement in the month of time.output_start."
+        },
+        "cycle_start_date": { "kind": "context", "type": "date", "source": "step.cycle_start_date" },
+        "statement_date":   { "kind": "context", "type": "date", "source": "step.statement_date" },
+        "days_in_cycle":    { "kind": "context", "type": "int16", "source": "step.days_in_cycle" },
+        "months_on_book":   { "kind": "context", "type": "int16", "source": "step.months_on_book" },
+
+        "payment_due_date": {
+          "kind": "derived", "type": "date", "rule": "common.date_offset",
+          "inputs": { "date": "account_cycle.statement_date" },
+          "params": { "days": 25 }
+        },
+        "opening_balance": {
+          "kind": "derived", "type": "decimal(12,2)", "rule": "common.copy",
+          "description": "Previous statement balance (state carried from t-1).",
+          "inputs": { "x": "account_cycle.statement_balance@t-1" }
+        },
+        "available_credit_open": {
+          "kind": "derived", "type": "decimal(12,2)", "emit": false, "rule": "credit.available",
+          "inputs": { "credit_limit": "account.credit_limit", "balance": "account_cycle.statement_balance@t-1" }
+        },
+
+        "missed_payment": {
+          "kind": "drawn", "type": "boolean", "dist": "bernoulli",
+          "description": "Behaviour draw: does the customer skip paying the last statement? Logit model so delinquency responds to FICO, utilisation, prior delinquency and the economy.",
+          "linear_predictor": {
+            "link": "logit",
+            "intercept": { "by": "account.segment", "values": { "$ref": "#/parameters/missed_payment_intercept" } },
+            "intercept_shift": -0.185547,
+            "terms": [
+              { "input": "account.fico_score", "coef": -0.6, "center": 700, "scale": 100 },
+              { "input": "account_cycle.utilization@t-1", "coef": 1.5 },
+              { "input": "shared.unemployment_rate", "coef": 0.25, "center": 4.0 },
+              { "input": "account_cycle.days_past_due@t-1", "transform": "gt0", "coef": 2.2 }
+            ]
+          }
+        },
+        "payment_amount": {
+          "kind": "drawn", "type": "decimal(12,2)", "rule": "payment.by_behaviour",
+          "description": "Payment against the previous statement, bounded inside the draw to [minimum due, statement balance]; 0 when missed.",
+          "inputs": {
+            "previous_balance": "account_cycle.statement_balance@t-1",
+            "previous_minimum_due": "account_cycle.minimum_payment_due@t-1",
+            "missed": "account_cycle.missed_payment"
+          },
+          "params": {
+            "p_full":      { "by": "account.segment", "values": { "$ref": "#/parameters/payment_p_full" } },
+            "p_minimum":   { "by": "account.segment", "values": { "$ref": "#/parameters/payment_p_minimum" } },
+            "partial_low": { "by": "account.segment", "values": { "$ref": "#/parameters/payment_partial_low" } },
+            "partial_high": 0.95
+          }
+        },
+        "payment_day": {
+          "kind": "drawn", "type": "int16", "emit": false, "nullable": true, "rule": "payment.posting_day",
+          "inputs": { "days_in_cycle": "account_cycle.days_in_cycle", "payment": "account_cycle.payment_amount" },
+          "params": { "due_offset_days": 25, "max_days_early": 10 }
+        },
+        "payment_date": {
+          "kind": "derived", "type": "date", "nullable": true, "rule": "common.add_days",
+          "description": "NULL when no payment was made (derived from the event, not an independent null mask).",
+          "inputs": { "date": "account_cycle.cycle_start_date", "days": "account_cycle.payment_day" },
+          "params": { "offset": -1 }
+        },
+        "paid_in_full": {
+          "kind": "derived", "type": "boolean", "rule": "payment.paid_in_full",
+          "inputs": { "payment": "account_cycle.payment_amount", "previous_balance": "account_cycle.statement_balance@t-1" }
+        },
+
+        "transaction_attempts": {
+          "kind": "drawn", "type": "int16", "emit": false, "dist": "poisson",
+          "description": "Number of card transactions attempted this cycle (log-linear: segment, seasonality, economy).",
+          "linear_predictor": {
+            "link": "log",
+            "intercept": { "by": "account.segment", "values": { "$ref": "#/parameters/log_transactions_per_cycle" } },
+            "intercept_shift": 0.046875,
+            "terms": [
+              { "input": "shared.spend_seasonality", "transform": "log", "coef": 1.0 },
+              { "input": "shared.unemployment_rate", "coef": -0.04, "center": 4.0 },
+              { "input": "account_cycle.days_past_due@t-1", "transform": "gt0", "coef": -0.5 }
+            ]
+          },
+          "params": { "max": 150 },
+          "bounds": { "min": 0, "max": 150, "on_violation": "clip" }
+        },
+
+        "purchases_total": {
+          "kind": "aggregate", "type": "decimal(12,2)", "over": "transaction", "fn": "sum", "of": "amount",
+          "where": "transaction_type in ['purchase', 'cash_advance'] and not is_declined"
+        },
+        "refunds_total": {
+          "kind": "aggregate", "type": "decimal(12,2)", "over": "transaction", "fn": "sum", "of": "amount",
+          "where": "transaction_type == 'refund' and not is_declined"
+        },
+        "transaction_count": {
+          "kind": "aggregate", "type": "int16", "over": "transaction", "fn": "count",
+          "where": "not is_declined"
+        },
+        "declined_count": {
+          "kind": "aggregate", "type": "int16", "over": "transaction", "fn": "count",
+          "where": "is_declined"
+        },
+        "activity_balance_days": {
+          "kind": "aggregate", "type": "decimal(16,2)", "emit": false, "over": "transaction",
+          "fn": "sum", "of": "balance_days"
+        },
+
+        "late_fee": {
+          "kind": "derived", "type": "decimal(8,2)", "rule": "fees.late_fee",
+          "inputs": { "payment": "account_cycle.payment_amount", "previous_minimum_due": "account_cycle.minimum_payment_due@t-1" },
+          "params": { "amount": 30.00 }
+        },
+        "interest_charged": {
+          "kind": "derived", "type": "decimal(10,2)", "rule": "interest.daily_balance",
+          "inputs": {
+            "opening_balance": "account_cycle.opening_balance",
+            "days_in_cycle": "account_cycle.days_in_cycle",
+            "activity_balance_days": "account_cycle.activity_balance_days",
+            "payment": "account_cycle.payment_amount",
+            "payment_day": "account_cycle.payment_day",
+            "grace": "account_cycle.paid_in_full",
+            "apr": "account.apr_purchase"
+          },
+          "params": { "day_count_basis": 365 },
+          "bounds": { "min": 0, "on_violation": "error" }
+        },
+        "statement_balance": {
+          "kind": "state", "type": "decimal(12,2)", "rule": "ledger.close_statement", "init": 0,
+          "inputs": {
+            "opening_balance": "account_cycle.opening_balance",
+            "purchases": "account_cycle.purchases_total",
+            "refunds": "account_cycle.refunds_total",
+            "fees": "account_cycle.late_fee",
+            "interest": "account_cycle.interest_charged",
+            "payment": "account_cycle.payment_amount"
+          }
+        },
+        "minimum_payment_due": {
+          "kind": "state", "type": "decimal(12,2)", "rule": "payment.minimum_due", "init": 0,
+          "description": "max($25, 2% of balance), capped at balance; 0 when balance is 0 (library rule, pinned v1.0).",
+          "inputs": { "balance": "account_cycle.statement_balance" },
+          "params": { "floor": 25.00, "pct": 0.02 },
+          "bounds": { "min": 0, "on_violation": "error" }
+        },
+        "utilization": {
+          "kind": "state", "type": "decimal(7,4)", "rule": "ratio.utilization", "init": 0,
+          "inputs": { "balance": "account_cycle.statement_balance", "credit_limit": "account.credit_limit" },
+          "bounds": { "min": 0, "max": 3, "on_violation": "error" }
+        },
+        "days_past_due": {
+          "kind": "state", "type": "int16", "rule": "delinquency.days_past_due", "init": 0,
+          "inputs": {
+            "previous_dpd": "account_cycle.days_past_due@t-1",
+            "payment": "account_cycle.payment_amount",
+            "previous_minimum_due": "account_cycle.minimum_payment_due@t-1"
+          },
+          "params": { "step_days": 30 },
+          "bounds": { "min": 0, "max": 180, "on_violation": "error" }
+        },
+        "delinquency_flag": {
+          "kind": "derived", "type": "boolean", "rule": "custom.is_delinquent",
+          "inputs": { "dpd": "account_cycle.days_past_due" },
+          "params": { "threshold": 30 }
+        },
+        "payment_ratio": {
+          "kind": "derived", "type": "decimal(7,4)", "nullable": true, "rule": "custom.payment_ratio",
+          "inputs": { "payment": "account_cycle.payment_amount", "previous_balance": "account_cycle.opening_balance" }
+        },
+        "revolving_flag": {
+          "kind": "derived", "type": "boolean", "rule": "custom.revolving",
+          "inputs": { "previous_balance": "account_cycle.opening_balance", "paid_in_full": "account_cycle.paid_in_full" }
+        },
+        "total_interest_to_date": {
+          "kind": "state", "type": "decimal(14,2)", "rule": "common.running_total", "init": 0,
+          "inputs": { "previous": "account_cycle.total_interest_to_date@t-1", "value": "account_cycle.interest_charged" }
+        },
+        "charged_off": {
+          "kind": "derived", "type": "boolean", "rule": "delinquency.charged_off",
+          "inputs": { "dpd": "account_cycle.days_past_due" },
+          "params": { "threshold": 180 }
+        },
+        "charge_off_amount": {
+          "kind": "derived", "type": "decimal(12,2)", "rule": "ledger.charge_off_amount",
+          "inputs": { "balance": "account_cycle.statement_balance", "charged_off": "account_cycle.charged_off" }
+        },
+        "account_status": {
+          "kind": "derived", "type": "string", "rule": "custom.account_status",
+          "allowed_values": { "values": ["active", "inactive", "delinquent", "charged_off"] },
+          "inputs": {
+            "balance": "account_cycle.statement_balance",
+            "dpd": "account_cycle.days_past_due",
+            "charged_off": "account_cycle.charged_off",
+            "transactions": "account_cycle.transaction_count"
+          }
+        }
+      }
+    },
+
+    "transaction": {
+      "role": "event",
+      "parent": "account_cycle",
+      "description": "One row per attempted card transaction. Generated inside each cycle before the cycle's aggregates.",
+      "count": "account_cycle.transaction_attempts",
+      "max_per_parent": 150,
+      "primary_key": ["transaction_id"],
+      "foreign_keys": [
+        { "columns": ["account_id", "cycle_number"], "references": "account_cycle", "ref_columns": ["account_id", "cycle_number"] }
+      ],
+      "order_by": ["transaction_timestamp"],
+      "nodes": {
+        "transaction_id": {
+          "kind": "identifier", "type": "string", "unique": true,
+          "format": { "pattern": "TXN-[A-Z0-9]{14}", "example": "TXN-4GH2KL9MXQ3W71" }
+        },
+        "account_id": { "kind": "parent_key", "type": "string", "references": "account.account_id" },
+        "cycle_number": { "kind": "context", "type": "int16", "source": "step.cycle_number" },
+        "merchant_id": {
+          "kind": "reference", "type": "string", "references": "merchant.merchant_id",
+          "weights": "merchant.popularity"
+        },
+        "mcc_group": {
+          "kind": "lookup", "type": "string", "via": "transaction.merchant_id", "from": "merchant.mcc_group"
+        },
+        "transaction_type": {
+          "kind": "drawn", "type": "string", "dist": "categorical",
+          "conditioned_on": "account.segment",
+          "params": {
+            "prime":      { "values": ["purchase", "cash_advance", "refund"], "weights": [0.965, 0.005, 0.03] },
+            "near_prime": { "values": ["purchase", "cash_advance", "refund"], "weights": [0.955, 0.020, 0.025] },
+            "subprime":   { "values": ["purchase", "cash_advance", "refund"], "weights": [0.930, 0.050, 0.020] },
+            "thin_file":  { "values": ["purchase", "cash_advance", "refund"], "weights": [0.955, 0.020, 0.025] }
+          }
+        },
+        "post_day": {
+          "kind": "drawn", "type": "int16", "emit": false, "dist": "uniform_int",
+          "params": { "low": 1, "high": { "input": "step.days_in_cycle" } }
+        },
+        "transaction_date": {
+          "kind": "derived", "type": "date", "rule": "common.add_days",
+          "inputs": { "date": "step.cycle_start_date", "days": "transaction.post_day" },
+          "params": { "offset": -1 }
+        },
+        "seconds_of_day": {
+          "kind": "drawn", "type": "int32", "emit": false, "rule": "time.seconds_of_day",
+          "params": { "hour_weights": [0.4, 0.2, 0.1, 0.1, 0.1, 0.3, 0.8, 1.6, 2.6, 3.4, 4.2, 5.4, 6.4, 5.8, 5.0, 4.8, 5.2, 6.0, 6.6, 6.0, 4.8, 3.4, 2.0, 1.0] }
+        },
+        "transaction_timestamp": {
+          "kind": "derived", "type": "timestamp", "rule": "common.date_plus_seconds",
+          "format": { "pattern": "YYYY-MM-DDTHH:MM:SS", "timezone": "UTC" },
+          "inputs": { "date": "transaction.transaction_date", "seconds": "transaction.seconds_of_day" }
+        },
+        "amount": {
+          "kind": "drawn", "type": "decimal(10,2)", "dist": "lognormal",
+          "conditioned_on": "transaction.mcc_group",
+          "params": { "$ref": "#/parameters/amount_by_mcc" },
+          "bounds": { "min": 1.00, "max": 25000.00, "on_violation": "truncate" }
+        },
+        "channel": {
+          "kind": "drawn", "type": "string", "dist": "categorical",
+          "conditioned_on": "transaction.mcc_group",
+          "params": {
+            "grocery":    { "values": ["card_present", "contactless", "card_not_present"], "weights": [0.55, 0.40, 0.05] },
+            "gas":        { "values": ["card_present", "contactless"], "weights": [0.70, 0.30] },
+            "restaurant": { "values": ["card_present", "contactless", "card_not_present"], "weights": [0.50, 0.35, 0.15] },
+            "travel":     { "values": ["card_present", "card_not_present"], "weights": [0.25, 0.75] },
+            "retail":     { "values": ["card_present", "contactless", "card_not_present"], "weights": [0.45, 0.25, 0.30] },
+            "utilities":  { "values": ["card_not_present"], "weights": [1.0] },
+            "online":     { "values": ["card_not_present"], "weights": [1.0] },
+            "other":      { "values": ["card_present", "contactless", "card_not_present", "atm"], "weights": [0.45, 0.20, 0.25, 0.10] }
+          }
+        },
+        "is_debit": {
+          "kind": "derived", "type": "boolean", "emit": false, "rule": "common.param_value",
+          "params": { "value": { "by": "transaction.transaction_type", "values": { "purchase": true, "cash_advance": true, "refund": false } } }
+        },
+        "risk_declined": {
+          "kind": "drawn", "type": "boolean", "emit": false, "dist": "bernoulli",
+          "description": "Declines for reasons other than the limit (fraud/risk rules).",
+          "params": { "p": 0.012 }
+        },
+        "is_declined": {
+          "kind": "derived", "type": "boolean", "rule": "spend.decline_over_limit",
+          "description": "Credit limit constraint enforced at the transaction level, in posting order.",
+          "inputs": {
+            "amount": "transaction.amount",
+            "is_debit": "transaction.is_debit",
+            "pre_declined": "transaction.risk_declined",
+            "post_day": "transaction.post_day",
+            "available_credit": "account_cycle.available_credit_open"
+          }
+        },
+        "decline_reason": {
+          "kind": "derived", "type": "string", "nullable": true, "rule": "custom.decline_reason",
+          "allowed_values": { "values": ["risk_block", "over_limit"] },
+          "inputs": { "is_declined": "transaction.is_declined", "risk_declined": "transaction.risk_declined" }
+        },
+        "posted_amount": {
+          "kind": "derived", "type": "decimal(10,2)", "emit": false, "rule": "txn.posted_amount",
+          "inputs": { "amount": "transaction.amount", "is_declined": "transaction.is_declined" },
+          "params": { "sign": { "by": "transaction.transaction_type", "values": { "purchase": 1, "cash_advance": 1, "refund": -1 } } }
+        },
+        "balance_days": {
+          "kind": "derived", "type": "decimal(16,2)", "emit": false, "rule": "ledger.balance_days_contribution",
+          "inputs": { "amount": "transaction.posted_amount", "post_day": "transaction.post_day", "days_in_cycle": "step.days_in_cycle" }
+        }
+      }
+    }
+  },
+
+  "rules": {
+    "custom.is_delinquent": {
+      "version": "1.0",
+      "description": "Delinquent when days past due reaches the threshold.",
+      "inputs": { "dpd": "int" },
+      "params": { "threshold": { "type": "int", "default": 30 } },
+      "output": "bool",
+      "expression": "dpd >= threshold",
+      "tests": [
+        { "inputs": { "dpd": 0 },  "expected": false },
+        { "inputs": { "dpd": 30 }, "expected": true },
+        { "inputs": { "dpd": 60 }, "params": { "threshold": 90 }, "expected": false }
+      ]
+    },
+    "custom.payment_ratio": {
+      "version": "1.0",
+      "description": "Payment as a share of the statement it pays; NULL when there was nothing to pay.",
+      "inputs": { "payment": "float", "previous_balance": "float" },
+      "params": { "cap": { "type": "float", "default": 5.0 } },
+      "output": "float",
+      "expression": "where(previous_balance > 0, min(payment / previous_balance, cap), NULL)",
+      "tests": [
+        { "inputs": { "payment": 50,  "previous_balance": 200 }, "expected": 0.25 },
+        { "inputs": { "payment": 0,   "previous_balance": 0 },   "expected": null },
+        { "inputs": { "payment": 100, "previous_balance": 10 },  "expected": 5.0 }
+      ]
+    },
+    "custom.revolving": {
+      "version": "1.0",
+      "description": "Account carried a balance it did not pay in full.",
+      "inputs": { "previous_balance": "float", "paid_in_full": "bool" },
+      "output": "bool",
+      "expression": "previous_balance > 0 and not paid_in_full",
+      "tests": [
+        { "inputs": { "previous_balance": 100, "paid_in_full": false }, "expected": true },
+        { "inputs": { "previous_balance": 100, "paid_in_full": true },  "expected": false },
+        { "inputs": { "previous_balance": 0,   "paid_in_full": true },  "expected": false }
+      ]
+    },
+    "custom.account_status": {
+      "version": "1.0",
+      "description": "Operational status of the account at statement time.",
+      "inputs": { "balance": "float", "dpd": "int", "charged_off": "bool", "transactions": "int" },
+      "output": "category",
+      "expression": "where(charged_off, 'charged_off', where(dpd >= 30, 'delinquent', where(balance > 0 or transactions > 0, 'active', 'inactive')))",
+      "tests": [
+        { "inputs": { "balance": 500, "dpd": 0,   "charged_off": false, "transactions": 3 }, "expected": "active" },
+        { "inputs": { "balance": 0,   "dpd": 0,   "charged_off": false, "transactions": 0 }, "expected": "inactive" },
+        { "inputs": { "balance": 900, "dpd": 60,  "charged_off": false, "transactions": 0 }, "expected": "delinquent" },
+        { "inputs": { "balance": 900, "dpd": 180, "charged_off": true,  "transactions": 0 }, "expected": "charged_off" }
+      ]
+    },
+    "custom.decline_reason": {
+      "version": "1.0",
+      "description": "Why a transaction was declined; NULL when approved.",
+      "inputs": { "is_declined": "bool", "risk_declined": "bool" },
+      "output": "category",
+      "expression": "where(not is_declined, NULL, where(risk_declined, 'risk_block', 'over_limit'))",
+      "tests": [
+        { "inputs": { "is_declined": false, "risk_declined": false }, "expected": null },
+        { "inputs": { "is_declined": true,  "risk_declined": true },  "expected": "risk_block" },
+        { "inputs": { "is_declined": true,  "risk_declined": false }, "expected": "over_limit" }
+      ]
+    }
+  },
+
+  "invariants": [
+    {
+      "name": "ledger_reconciles",
+      "type": "row", "table": "account_cycle",
+      "description": "closing = opening + purchases - refunds + fees + interest - payment, to the cent",
+      "expression": "abs(statement_balance - (opening_balance + purchases_total - refunds_total + late_fee + interest_charged - payment_amount)) < 0.005"
+    },
+    {
+      "name": "opening_equals_previous_close",
+      "type": "continuity", "table": "account_cycle",
+      "current": "opening_balance", "previous": "statement_balance",
+      "partition_by": ["account_id"], "order_by": "cycle_number"
+    },
+    {
+      "name": "purchases_match_transactions",
+      "type": "aggregate", "parent": "account_cycle", "child": "transaction",
+      "keys": ["account_id", "cycle_number"],
+      "parent_column": "purchases_total", "fn": "sum", "child_column": "amount",
+      "where": "transaction_type in ['purchase', 'cash_advance'] and not is_declined"
+    },
+    {
+      "name": "transaction_count_matches",
+      "type": "aggregate", "parent": "account_cycle", "child": "transaction",
+      "keys": ["account_id", "cycle_number"],
+      "parent_column": "transaction_count", "fn": "count",
+      "where": "not is_declined"
+    },
+    {
+      "name": "interest_to_date_never_decreases",
+      "type": "monotonic", "table": "account_cycle", "column": "total_interest_to_date",
+      "partition_by": ["account_id"], "order_by": "cycle_number", "direction": "non_decreasing"
+    },
+    {
+      "name": "payment_never_exceeds_statement",
+      "type": "row", "table": "account_cycle",
+      "expression": "payment_amount <= max(opening_balance, 0) + 0.001"
+    },
+    {
+      "name": "no_interest_when_paid_in_full",
+      "type": "row", "table": "account_cycle",
+      "expression": "not paid_in_full or interest_charged == 0"
+    },
+    {
+      "name": "minimum_due_rule",
+      "type": "row", "table": "account_cycle",
+      "expression": "abs(minimum_payment_due - where(statement_balance <= 0, 0, min(statement_balance, max(25, round_half_up(statement_balance * 0.02, 2))))) < 0.005"
+    },
+    {
+      "name": "payment_date_only_when_paid",
+      "type": "row", "table": "account_cycle",
+      "expression": "isnull(payment_date) == (payment_amount == 0)"
+    },
+    {
+      "name": "declined_have_reason",
+      "type": "row", "table": "transaction",
+      "expression": "is_declined == notnull(decline_reason)"
+    }
+  ],
+
+  "targets": [
+    {
+      "id": "dpd30_rate", "table": "account_cycle", "metric": "share",
+      "where": "days_past_due >= 30", "target": 0.035, "tolerance": 0.008,
+      "calibrate": {
+        "parameter": "/entities/account_cycle/nodes/missed_payment/linear_predictor/intercept_shift",
+        "low": -4.0, "high": 4.0, "direction": "increasing"
+      }
+    },
+    { "id": "dpd60_rate",  "table": "account_cycle", "metric": "share", "where": "days_past_due >= 60",  "target": 0.018, "tolerance": 0.008 },
+    { "id": "dpd90_rate",  "table": "account_cycle", "metric": "share", "where": "days_past_due >= 90",  "target": 0.011, "tolerance": 0.006 },
+    {
+      "id": "transactions_per_cycle", "table": "account_cycle", "metric": "mean",
+      "of": "transaction_count", "target": 11.0, "tolerance": 0.75,
+      "calibrate": {
+        "parameter": "/entities/account_cycle/nodes/transaction_attempts/linear_predictor/intercept_shift",
+        "low": -1.5, "high": 1.5, "direction": "increasing"
+      }
+    },
+    { "id": "revolving_share", "table": "account_cycle", "metric": "share", "where": "revolving_flag", "target": 0.45, "tolerance": 0.08 }
+  ],
+
+  "calibration": {
+    "description": "python -m synthgen calibrate tunes each target's 'calibrate.parameter' on a sample and writes the values back here (the intercept_shift values above came from this).",
+    "sample_roots": 4000,
+    "max_iterations": 14,
+    "rounds": 2
+  },
+
+  "output": {
+    "directory": "output",
+    "format": "csv",
+    "chunk_size": 10000,
+    "workers": 0
+  }
+}

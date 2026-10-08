@@ -1,0 +1,30 @@
+{
+  "contract": {"name": "cardinal_accounts_demo", "version": "1.0", "description": "Fictional snapshot for learning; illustrative assumptions, not industry statistics. Half-up rounding: money to 2 decimal places and utilization fraction to 4. Verification tolerance: 0.005 for money and 0.00005 plus 1e-12 floating-point margin for utilization. No history, payments, fees, interest or delinquency."},
+  "seed": 42,
+  "volume": {"account": 2000},
+  "rule_library": {"packages": ["common"]},
+  "conventions": {"rounding": {"mode": "half_up"}},
+  "entities": {
+    "account": {
+      "role": "static", "primary_key": ["account_id"],
+      "nodes": {
+        "account_id": {"kind": "identifier", "type": "string", "nullable": false, "unique": true, "format": {"pattern": "ACC-[0-9]{8}"}},
+        "segment": {"kind": "drawn", "type": "string", "nullable": false, "dist": "categorical", "params": {"values": ["standard", "premium"], "weights": [0.8, 0.2]}},
+        "credit_limit": {"kind": "drawn", "type": "decimal(12,2)", "nullable": false, "dist": "categorical", "conditioned_on": "account.segment", "params": {"standard": {"values": [1000, 3000], "weights": [0.8, 0.2]}, "premium": {"values": [5000, 10000], "weights": [0.3, 0.7]}}},
+        "opening_balance": {"kind": "drawn", "type": "decimal(12,2)", "nullable": false, "dist": "uniform", "params": {"low": 0, "high": 400}},
+        "available_credit": {"kind": "derived", "type": "decimal(12,2)", "nullable": false, "rule": "common.subtract", "inputs": {"a": "account.credit_limit", "b": "account.opening_balance"}},
+        "utilization": {"kind": "derived", "type": "decimal(6,4)", "nullable": false, "rule": "common.ratio", "inputs": {"numerator": "account.opening_balance", "denominator": "account.credit_limit"}}
+      }
+    }
+  },
+  "invariants": [
+    {"name": "standard_limits", "type": "row", "table": "account", "expression": "(segment != 'standard') or (credit_limit == 1000) or (credit_limit == 3000)"},
+    {"name": "premium_limits", "type": "row", "table": "account", "expression": "(segment != 'premium') or (credit_limit == 5000) or (credit_limit == 10000)"},
+    {"name": "balance_range", "type": "row", "table": "account", "expression": "(opening_balance >= 0) and (opening_balance <= 400)"},
+    {"name": "credit_equation", "type": "row", "table": "account", "expression": "abs(available_credit - (credit_limit - opening_balance)) <= 0.005"},
+    {"name": "utilization_equation", "type": "row", "table": "account", "expression": "abs(utilization - opening_balance / credit_limit) <= 0.000050000001"},
+    {"name": "nonnegative_credit", "type": "row", "table": "account", "expression": "available_credit >= 0"},
+    {"name": "utilization_fraction", "type": "row", "table": "account", "expression": "(utilization >= 0) and (utilization <= 1)"}
+  ],
+  "output": {"directory": "output", "format": "csv", "workers": 1, "chunk_size": 1000}
+}

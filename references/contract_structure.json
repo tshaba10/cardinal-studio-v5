@@ -1,0 +1,283 @@
+{
+  "_about": "General structure of a synthgen contract. Values are placeholders: 'string', 'integer', 'number', 'boolean', 'date (YYYY-MM-DD)', or 'a | b | c' for an enumeration. Keys starting with '_' are documentation only. 'ref' means a column reference (see _references). Any value anywhere may be replaced by {\"$ref\": \"#/path/to/value\"} pointing elsewhere in the same contract.",
+
+  "_references": {
+    "entity.column": "value of a column in the current step (own entity, an ancestor, or a child entity inside an aggregate)",
+    "entity.column@t-1": "value of a column in the previous step (stepped entities only; the column must declare 'init')",
+    "step.<name>": "statement_date | cycle_start_date | days_in_cycle | cycle_number | months_on_book | step_index | month_of_year",
+    "shared.<name>": "value of a shared series at the current step",
+    "row.<name>": "ordinal | seq (seq exists on event entities only)"
+  },
+
+  "_column_types": "string | int8 | int16 | int32 | int64 | integer | decimal(precision,scale) | float | boolean | date | timestamp",
+
+  "contract": {
+    "name": "string",
+    "version": "string",
+    "domain": "string",
+    "description": "string"
+  },
+
+  "seed": "integer (required)",
+
+  "volume": {
+    "<static entity name>": "integer - number of rows (e.g. \"account\": 100000)",
+    "steps": "integer - number of output time steps (used by time.output_steps via $ref)"
+  },
+
+  "rule_library": {
+    "packages": ["common | credit_card | <your package>"],
+    "pins": {
+      "<rule name>": "string - version to use (otherwise the latest version is used)"
+    }
+  },
+
+  "conventions": {
+    "rounding": {
+      "mode": "half_up | half_even | floor | ceil | down (default half_up)",
+      "applied": "string - documentation"
+    },
+    "<any other convention>": "string - documentation only (money, day_count, event_ordering, ...)"
+  },
+
+  "parameters": {
+    "<any name>": "any JSON value - reusable values referenced with {\"$ref\": \"#/parameters/<name>\"}"
+  },
+
+  "time": {
+    "_required_when": "the contract has a stepped entity",
+    "calendar": "monthly_cycle_day | monthly",
+    "output_start": "date (YYYY-MM-DD) - cycle_number 1 is the statement in this month",
+    "output_steps": "integer (or {\"$ref\": \"#/volume/steps\"})",
+    "warmup_max_steps": "integer | null - steps simulated before the window and discarded (null = from each entity's start date)",
+    "anchor": {
+      "start_date": "ref - date column of the stepped entity's parent (e.g. account.open_date)",
+      "cycle_day": "ref - int column with bounds.max <= 28 (monthly_cycle_day calendar only)"
+    },
+    "anchors": {
+      "<stepped entity name>": {
+        "start_date": "ref",
+        "cycle_day": "ref",
+        "_note": "use 'anchors' instead of 'anchor' when there are several stepped entities"
+      }
+    }
+  },
+
+  "shared": {
+    "<series name>": {
+      "description": "string",
+      "process": "ar1 | seasonal | constant | explicit",
+      "params": {
+        "_ar1": { "mean": "number", "phi": "number (|phi| < 1)", "sigma": "number", "initial": "number", "min": "number", "max": "number" },
+        "_seasonal": { "by_month": ["number x 12 (Jan..Dec)"] },
+        "_constant": { "value": "number" },
+        "_explicit": { "values": { "YYYY-MM": "number" }, "default": "number" }
+      },
+      "shocks": [
+        { "from": "date", "to": "date", "add": "number", "multiply": "number" }
+      ]
+    }
+  },
+
+  "entities": {
+    "<entity name>": {
+      "role": "static | stepped | event (required)",
+      "description": "string",
+      "parent": "string - entity name (stepped: a static entity; event: a stepped entity)",
+      "count": "static: integer (alternative to volume.<entity>) | event: ref to an integer column of the parent (required for event)",
+      "max_per_parent": "integer - event only: upper bound of the count column (default 500)",
+      "primary_key": ["string - column names"],
+      "foreign_keys": [
+        { "columns": ["string"], "references": "string - entity name", "ref_columns": ["string"] }
+      ],
+      "terminal_when": "ref - stepped only: boolean column of this entity; true stops the entity after that step",
+      "order_by": ["string - event only: columns that order rows within a parent step (e.g. a timestamp)"],
+      "emit": "boolean - write this entity to CSV (default true)",
+      "joint_groups": {
+        "<group name>": {
+          "method": "gaussian_copula",
+          "description": "string",
+          "members": ["string - joint column names of this entity"],
+          "correlation": [["number - symmetric, unit diagonal, positive definite; one row per member"]]
+        }
+      },
+      "nodes": {
+        "<column name>": { "$ref_doc": "#/node" }
+      }
+    }
+  },
+
+  "node": {
+    "_about": "One column. Every node has exactly one 'kind'. See node_fields_by_kind for which fields apply.",
+
+    "kind": "identifier | parent_key | reference | lookup | context | drawn | decorative | joint | derived | state | aggregate (required)",
+    "type": "column type, see _column_types (default string)",
+    "description": "string",
+    "emit": "boolean - write to CSV (default true; false = internal helper column)",
+    "nullable": "boolean (default false)",
+    "null_rate": "number in [0,1) - drawn/decorative only; needs nullable: true",
+    "unique": "boolean - checked by verify",
+    "given": ["ref - extra dependencies (documentation / ordering only)"],
+
+    "format": {
+      "pattern": "string - identifier pattern, e.g. ACC-[A-Z0-9]{10} (literals, [..] sets/ranges, \\d, {n})",
+      "example": "string",
+      "check_digit": "string - documentation (e.g. luhn)",
+      "timezone": "string - documentation (e.g. UTC)"
+    },
+
+    "allowed_values": {
+      "values": ["string | number | boolean - category labels; also the label set for derived string columns"],
+      "weights": ["number - sums to 1 (used when this is a categorical draw without dist/params)"]
+    },
+
+    "bounds": {
+      "min": "number | date",
+      "max": "number | date",
+      "on_violation": "truncate | reject | clip | error | warn (drawn default truncate = draw inside the bounds; derived default error = checked by verify)"
+    },
+
+    "quantization": {
+      "round_to": "number in value units (e.g. 500, 0.0025, 0.05); must be a multiple of 10^-scale",
+      "mode": "half_up | half_even | floor | ceil | down (default conventions.rounding.mode)"
+    },
+
+    "init": "number | boolean | date | null - value read at @t-1 on an entity's first step (required for state nodes and anything read with @t-1)",
+
+    "references": "ref - identifier column (parent_key: an ancestor's id; reference: a static entity's id)",
+    "weights": "ref - reference only: numeric column of the target entity used as selection weight",
+
+    "via": "ref - lookup only: a reference column of this entity",
+    "from": "ref - lookup only: column of the referenced entity to copy",
+
+    "source": "ref - context only: step.<name> or row.<name>",
+
+    "dist": "categorical | bernoulli | normal | lognormal | uniform | uniform_int | poisson | beta | exponential | date_uniform | constant",
+    "conditioned_on": "ref - categorical column; params then become one block per category label (or 'default')",
+    "params": {
+      "_unconditioned": "{ <param>: value } - see dist_params",
+      "_conditioned": "{ <category label>: { <param>: value }, \"default\": { ... } }",
+      "_per_row_value": "a param value may also be {\"by\": ref, \"values\": {label: value}, \"default\": value} or {\"input\": ref}",
+      "_rule_params": "for rule-based nodes: { <rule param name>: literal | per-row value }"
+    },
+    "linear_predictor": {
+      "_applies_to": "bernoulli (link logit) | poisson (link log) | normal (identity)",
+      "link": "logit | log | identity | probit",
+      "intercept": "number | {\"by\": ref, \"values\": {label: number}}",
+      "intercept_shift": "number - tuned by calibrate (default 0)",
+      "terms": [
+        {
+          "input": "ref (may use @t-1, shared.*)",
+          "coef": "number",
+          "transform": "identity | gt0 | log | log1p | sqrt | square (applied first)",
+          "center": "number (default 0)",
+          "scale": "number (default 1)",
+          "null_as": "number - contribution when the input is NULL (default 0)"
+        }
+      ]
+    },
+    "zero_mass": "number | per-row value - probability that a drawn value is exactly 0",
+    "allocation": "random | exact - exact = quota allocation (static, unconditioned categorical only)",
+
+    "group": "string - joint only: name of a joint_groups entry of this entity",
+
+    "rule": "string - rule name (derived/state: a rule; drawn/decorative: a sampler)",
+    "version": "string - pin this node to a rule version",
+    "inputs": {
+      "<rule argument name>": "ref - must match the rule signature exactly"
+    },
+
+    "over": "string - aggregate only: child event entity name",
+    "fn": "sum | count | mean | min | max (aggregate only; default sum)",
+    "of": "string - aggregate only: child column (not needed for count)",
+    "where": "string - aggregate only: expression over child columns, e.g. \"transaction_type in ['purchase'] and not is_declined\""
+  },
+
+  "dist_params": {
+    "categorical": { "values": ["any"], "weights": ["number - sums to 1 (optional = uniform)"] },
+    "bernoulli": { "p": "number in [0,1] (or use linear_predictor)" },
+    "normal": { "mean": "number (or linear_predictor)", "std": "number" },
+    "lognormal": { "mu": "number (log scale)", "sigma": "number" },
+    "uniform": { "low": "number", "high": "number" },
+    "uniform_int": { "low": "integer", "high": "integer (inclusive)" },
+    "poisson": { "lam": "number (or linear_predictor)", "max": "integer" },
+    "beta": { "a": "number", "b": "number", "low": "number (default 0)", "high": "number (default 1)" },
+    "exponential": { "scale": "number" },
+    "date_uniform": { "start": "date", "end": "date" },
+    "constant": { "value": "any" }
+  },
+
+  "node_fields_by_kind": {
+    "identifier":  { "required": ["kind", "type: string", "format.pattern"], "optional": ["unique", "format.example", "emit"] },
+    "parent_key":  { "required": ["kind", "references"], "optional": ["type", "emit"] },
+    "reference":   { "required": ["kind", "references"], "optional": ["weights", "null_rate", "nullable", "emit"] },
+    "lookup":      { "required": ["kind", "via", "from"], "optional": ["type", "emit"] },
+    "context":     { "required": ["kind", "source"], "optional": ["type", "emit"] },
+    "drawn":       { "required": ["kind", "type", "dist + params | rule (sampler) | allowed_values"], "optional": ["conditioned_on", "linear_predictor", "zero_mass", "allocation", "bounds", "quantization", "null_rate", "nullable", "inputs", "emit"] },
+    "decorative":  { "required": ["same as drawn"], "optional": ["same as drawn - a drawn column with no relationships"] },
+    "joint":       { "required": ["kind", "type", "group", "dist", "params"], "optional": ["conditioned_on", "bounds", "quantization", "emit"] },
+    "derived":     { "required": ["kind", "type", "rule", "inputs"], "optional": ["params", "version", "bounds", "quantization", "allowed_values", "nullable", "init", "emit"] },
+    "state":       { "required": ["kind", "type", "rule", "inputs", "init"], "optional": ["params", "version", "bounds", "quantization", "emit"] },
+    "aggregate":   { "required": ["kind", "type", "over", "fn", "of (unless fn = count)"], "optional": ["where", "emit"] }
+  },
+
+  "rules": {
+    "<custom.rule_name>": {
+      "version": "string (default 1.0)",
+      "description": "string",
+      "inputs": { "<argument>": "float | int | bool | date | timestamp | category | any" },
+      "params": { "<name>": { "type": "float | int | bool | any", "default": "any" } },
+      "output": "float | int | bool | date | timestamp | category | any",
+      "expression": "string - e.g. \"where(previous_balance > 0, payment / previous_balance, NULL)\"",
+      "tests": [
+        { "inputs": { "<argument>": "value | null" }, "params": { "<name>": "value" }, "expected": "value | null", "tolerance": "number" }
+      ],
+      "override": "boolean - replace a library rule with the same name and version"
+    }
+  },
+
+  "invariants": [
+    { "type": "row", "name": "string", "table": "string", "description": "string",
+      "expression": "string - must be true on every row" },
+    { "type": "continuity", "name": "string", "table": "string",
+      "current": "string - column (e.g. opening_balance)", "previous": "string - column (e.g. statement_balance)",
+      "partition_by": ["string"], "order_by": "string", "tolerance": "number (default 0.005)" },
+    { "type": "monotonic", "name": "string", "table": "string", "column": "string",
+      "partition_by": ["string"], "order_by": "string", "direction": "non_decreasing | non_increasing" },
+    { "type": "aggregate", "name": "string", "parent": "string - entity", "child": "string - entity",
+      "keys": ["string - columns present in both"], "parent_column": "string",
+      "fn": "sum | count", "child_column": "string (sum only)", "where": "string - expression",
+      "tolerance": "number (default 0.005)" }
+  ],
+
+  "targets": [
+    {
+      "id": "string",
+      "table": "string",
+      "metric": "share | mean",
+      "where": "string - share only: expression whose true-share is measured",
+      "of": "string - mean only: expression whose mean is measured",
+      "target": "number (share in [0,1])",
+      "tolerance": "number",
+      "calibrate": {
+        "parameter": "string - JSON pointer into a node, e.g. /entities/<e>/nodes/<col>/linear_predictor/intercept_shift",
+        "low": "number",
+        "high": "number",
+        "direction": "increasing | decreasing - how the metric moves when the parameter increases"
+      }
+    }
+  ],
+
+  "calibration": {
+    "sample_roots": "integer (default 4000)",
+    "max_iterations": "integer (default 14)",
+    "rounds": "integer (default 2)"
+  },
+
+  "output": {
+    "directory": "string (default output)",
+    "format": "csv",
+    "chunk_size": "integer - roots simulated per chunk (default 10000)",
+    "workers": "integer - parallel processes, 0 = all cores (default 1)"
+  }
+}

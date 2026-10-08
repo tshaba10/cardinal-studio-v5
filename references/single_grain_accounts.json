@@ -1,0 +1,79 @@
+{
+  "contract": {
+    "name": "single_grain_accounts",
+    "version": "1.0.0",
+    "description": "One grain only (account), arbitrary segment labels. Shows that nothing about categories, columns or volumes is hard-coded."
+  },
+  "seed": 7,
+  "volume": { "account": 5000 },
+  "rule_library": { "packages": ["common"] },
+  "conventions": { "rounding": { "mode": "half_up" } },
+
+  "entities": {
+    "account": {
+      "role": "static",
+      "primary_key": ["account_id"],
+      "nodes": {
+        "account_id": {
+          "kind": "identifier", "type": "string",
+          "format": { "pattern": "A[0-9]{7}" }
+        },
+        "segment": {
+          "kind": "drawn", "type": "string", "dist": "categorical",
+          "params": { "values": ["x", "y", "z"], "weights": [0.5, 0.3, 0.2] }
+        },
+        "fico_score": {
+          "kind": "drawn", "type": "int16", "dist": "normal",
+          "conditioned_on": "account.segment",
+          "params": {
+            "x": { "mean": 760, "std": 40 },
+            "y": { "mean": 680, "std": 40 },
+            "z": { "mean": 600, "std": 60 }
+          },
+          "bounds": { "min": 300, "max": 850, "on_violation": "truncate" }
+        },
+        "credit_score": {
+          "kind": "drawn", "type": "decimal(6,3)", "dist": "beta",
+          "conditioned_on": "account.segment",
+          "params": {
+            "x": { "a": 8, "b": 2, "low": 0, "high": 10 },
+            "y": { "a": 5, "b": 3, "low": 0, "high": 10 },
+            "z": { "a": 2, "b": 4, "low": 0, "high": 10 }
+          },
+          "quantization": { "round_to": 0.125, "mode": "half_even" },
+          "bounds": { "min": 0, "max": 10, "on_violation": "clip" }
+        },
+        "opened_on": {
+          "kind": "drawn", "type": "date", "dist": "date_uniform",
+          "params": { "start": "2020-01-01", "end": "2024-12-31" }
+        },
+        "score_band": {
+          "kind": "derived", "type": "string", "rule": "custom.score_band",
+          "allowed_values": { "values": ["low", "mid", "high"] },
+          "inputs": { "fico": "account.fico_score" }
+        }
+      }
+    }
+  },
+
+  "rules": {
+    "custom.score_band": {
+      "version": "1.0",
+      "inputs": { "fico": "int" },
+      "output": "category",
+      "expression": "where(fico >= 740, 'high', where(fico >= 640, 'mid', 'low'))",
+      "tests": [
+        { "inputs": { "fico": 800 }, "expected": "high" },
+        { "inputs": { "fico": 700 }, "expected": "mid" },
+        { "inputs": { "fico": 500 }, "expected": "low" }
+      ]
+    }
+  },
+
+  "invariants": [
+    { "name": "band_matches_score", "type": "row", "table": "account",
+      "expression": "(score_band == 'high') == (fico_score >= 740)" }
+  ],
+
+  "output": { "directory": "output_single", "chunk_size": 10000, "workers": 1 }
+}

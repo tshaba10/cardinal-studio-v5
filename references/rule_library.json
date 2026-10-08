@@ -1,0 +1,157 @@
+[
+  {
+    "signature": "common.copy@1.0(x: any; params: ) -> any",
+    "kind": "rule",
+    "description": "Return the input unchanged (e.g. expose a lagged state as a column)."
+  },
+  {
+    "signature": "common.param_value@1.0(; params: value: any) -> any",
+    "kind": "rule",
+    "description": "Return a (possibly per-row, category-dependent) parameter as a column."
+  },
+  {
+    "signature": "common.add_days@1.0(date: date, days: int; params: offset: int = 0) -> date",
+    "kind": "rule",
+    "description": "date + days + offset."
+  },
+  {
+    "signature": "common.date_offset@1.0(date: date; params: days: int) -> date",
+    "kind": "rule",
+    "description": "date + a fixed (or per-row) number of days."
+  },
+  {
+    "signature": "common.days_between@1.0(start: date, end: date; params: ) -> int",
+    "kind": "rule",
+    "description": "end - start in days."
+  },
+  {
+    "signature": "common.date_plus_seconds@1.0(date: date, seconds: int; params: ) -> timestamp",
+    "kind": "rule",
+    "description": "Combine a date and seconds-after-midnight into a timestamp."
+  },
+  {
+    "signature": "common.ratio@1.0(numerator: float, denominator: float; params: floor_numerator_at_zero: bool = False) -> float",
+    "kind": "rule",
+    "description": "numerator / denominator; NULL where the denominator is 0."
+  },
+  {
+    "signature": "common.add@1.0(a: fixed6, b: fixed6; params: ) -> fixed6",
+    "kind": "rule",
+    "description": "a + b, exact to 6 decimal places."
+  },
+  {
+    "signature": "common.subtract@1.0(a: fixed6, b: fixed6; params: ) -> fixed6",
+    "kind": "rule",
+    "description": "a - b, exact to 6 decimal places."
+  },
+  {
+    "signature": "common.running_total@1.0(previous: fixed6, value: fixed6; params: ) -> fixed6",
+    "kind": "rule",
+    "description": "Cumulative sum carried as state: previous total + this step's value."
+  },
+  {
+    "signature": "common.at_least@1.0(x: float; params: threshold: float) -> bool",
+    "kind": "rule",
+    "description": "x >= threshold."
+  },
+  {
+    "signature": "common.any_true@1.0(a: bool, b: bool; params: ) -> bool",
+    "kind": "rule",
+    "description": "a OR b."
+  },
+  {
+    "signature": "text.compose@1.0(; params: parts: list, separator: any = ' ') -> any",
+    "kind": "sampler",
+    "description": "Build a string by picking one word from each list in ``parts``."
+  },
+  {
+    "signature": "time.seconds_of_day@1.0(; params: hour_weights: list = None) -> int",
+    "kind": "sampler",
+    "description": "Seconds after midnight; hour drawn from ``hour_weights`` (24 values)."
+  },
+  {
+    "signature": "payment.minimum_due@1.0(balance: money; params: floor: money = 25.0, pct: float = 0.02) -> money",
+    "kind": "rule",
+    "description": "max(floor, pct x balance), capped at the balance; 0 when balance <= 0."
+  },
+  {
+    "signature": "payment.minimum_due@2.0(balance: money, interest: money, fees: money; params: floor: money = 25.0, pct: float = 0.01) -> money",
+    "kind": "rule",
+    "description": "max(floor, pct x balance + interest + fees), capped at the balance; 0 when balance <= 0."
+  },
+  {
+    "signature": "payment.paid_in_full@1.0(payment: money, previous_balance: money; params: ) -> bool",
+    "kind": "rule",
+    "description": "True when the previous statement balance was fully paid (or was <= 0)."
+  },
+  {
+    "signature": "payment.by_behaviour@1.0(previous_balance: money, previous_minimum_due: money, missed: bool; params: p_full: float, p_minimum: float, partial_low: float = 0.05, partial_high: float = 0.9) -> money",
+    "kind": "sampler",
+    "description": "Payment against last statement: full / minimum / partial; 0 if missed."
+  },
+  {
+    "signature": "payment.posting_day@1.0(days_in_cycle: int, payment: money; params: due_offset_days: int = 25, max_days_early: int = 10) -> int",
+    "kind": "sampler",
+    "description": "Day of the cycle the payment posts (on or before the due date); NULL if no payment."
+  },
+  {
+    "signature": "interest.daily_balance@1.0(opening_balance: money, days_in_cycle: int, activity_balance_days: money, payment: money, payment_day: int, grace: bool, apr: fixed6; params: day_count_basis: int = 365) -> money",
+    "kind": "rule",
+    "description": "Sum of end-of-day balances x APR / basis, half-up to the cent; 0 in grace."
+  },
+  {
+    "signature": "ledger.balance_days_contribution@1.0(amount: money, post_day: int, days_in_cycle: int; params: ) -> money",
+    "kind": "rule",
+    "description": "amount x number of end-of-day balances it is part of (cent-days)."
+  },
+  {
+    "signature": "ledger.close_statement@1.0(opening_balance: money, purchases: money, refunds: money, fees: money, interest: money, payment: money; params: ) -> money",
+    "kind": "rule",
+    "description": "closing = opening + purchases - refunds + fees + interest - payment (exact)."
+  },
+  {
+    "signature": "txn.posted_amount@1.0(amount: money, is_declined: bool; params: sign: int = 1) -> money",
+    "kind": "rule",
+    "description": "Signed amount that hits the balance (0 if declined; refunds have sign -1)."
+  },
+  {
+    "signature": "fees.late_fee@1.0(payment: money, previous_minimum_due: money; params: amount: money = 30.0) -> money",
+    "kind": "rule",
+    "description": "Flat late fee when the minimum was not met, never more than the minimum due."
+  },
+  {
+    "signature": "ratio.utilization@1.0(balance: money, credit_limit: money; params: ) -> float",
+    "kind": "rule",
+    "description": "max(balance, 0) / credit_limit; NULL when the limit is 0."
+  },
+  {
+    "signature": "credit.available@1.0(credit_limit: money, balance: money; params: ) -> money",
+    "kind": "rule",
+    "description": "credit_limit - balance (negative when over limit)."
+  },
+  {
+    "signature": "delinquency.days_past_due@1.0(previous_dpd: int, payment: money, previous_minimum_due: money; params: step_days: int = 30) -> int",
+    "kind": "rule",
+    "description": "+step_days when the minimum due was not paid, otherwise back to 0."
+  },
+  {
+    "signature": "delinquency.charged_off@1.0(dpd: int; params: threshold: int = 180) -> bool",
+    "kind": "rule",
+    "description": "Terminal state: days past due reached the charge-off threshold."
+  },
+  {
+    "signature": "ledger.charge_off_amount@1.0(balance: money, charged_off: bool; params: ) -> money",
+    "kind": "rule",
+    "description": "Balance written off at charge-off (0 otherwise)."
+  },
+  {
+    "signature": "spend.decline_over_limit@1.0(amount: money, is_debit: bool, pre_declined: bool, post_day: int, available_credit: money; params: ) -> bool",
+    "kind": "group",
+    "description": "Declined = declined for another reason (risk block) OR the debit would push"
+  },
+  {
+    "signature": "id.masked_pan@1.0(; params: prefixes: list = ['4', '51', '52', '53', '54', '55'], prefix_weights: list = None, length: int = 16) -> any",
+    "kind": "sampler",
+    "description": "Luhn-valid card number, masked as 'NNNN **** **** NNNN'."
+  }
+]

@@ -1,0 +1,14 @@
+[server]
+address = "127.0.0.1"
+port = 8506
+fileWatcherType = "none"
+maxUploadSize = 1
+[browser]
+serverAddress = "127.0.0.1"
+gatherUsageStats = false
+[theme]
+base = "light"
+primaryColor = "#155E75"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#EEF4F8"
+textColor = "#172B4D"
